@@ -29,6 +29,9 @@
 #include <AP_RSSI/AP_RSSI.h>
 #include <AP_Notify/AP_Notify.h>
 #include <AP_Stats/AP_Stats.h>
+#include <AP_Common/Location.h>
+#include <AP_BattMonitor/AP_BattMonitor.h>
+#include <AP_GPS/AP_GPS.h>
 
 #include <ctype.h>
 #include <GCS_MAVLink/GCS.h>
@@ -426,14 +429,16 @@ float AP_OSD_Screen::u_scale(enum unit_type unit, float value)
 void AP_OSD_Screen::draw_altitude(uint8_t x, uint8_t y)
 {
     float alt;
-    AP::ahrs().get_relative_position_D_home(alt);
+    AP_AHRS &ahrs = AP::ahrs();
+    WITH_SEMAPHORE(ahrs.get_semaphore());
+    ahrs.get_relative_position_D_home(alt);
     alt = -alt;
     backend->write(x, y, false, "%4d%c", (int)u_scale(ALTITUDE, alt), u_icon(ALTITUDE));
 }
 
 void AP_OSD_Screen::draw_bat_volt(uint8_t x, uint8_t y)
 {
-    AP_BattMonitor &battery = AP_BattMonitor::battery();
+    AP_BattMonitor &battery = AP::battery();
     uint8_t pct = battery.capacity_remaining_pct();
     uint8_t p = (100 - pct) / 16.6;
     float v = battery.voltage();
@@ -442,7 +447,7 @@ void AP_OSD_Screen::draw_bat_volt(uint8_t x, uint8_t y)
 
 void AP_OSD_Screen::draw_rssi(uint8_t x, uint8_t y)
 {
-    AP_RSSI *ap_rssi = AP_RSSI::get_instance();
+    AP_RSSI *ap_rssi = AP_RSSI::get_singleton();
     if (ap_rssi) {
         int rssiv = ap_rssi->read_receiver_rssi_uint8();
         rssiv = (rssiv * 99) / 255;
@@ -452,14 +457,14 @@ void AP_OSD_Screen::draw_rssi(uint8_t x, uint8_t y)
 
 void AP_OSD_Screen::draw_current(uint8_t x, uint8_t y)
 {
-    AP_BattMonitor &battery = AP_BattMonitor::battery();
+    AP_BattMonitor &battery = AP::battery();
     float amps = battery.current_amps();
     backend->write(x, y, false, "%2.1f%c", (double)amps, SYM_AMP);
 }
 
 void AP_OSD_Screen::draw_fltmode(uint8_t x, uint8_t y)
 {
-    AP_Notify * notify = AP_Notify::instance();
+    AP_Notify * notify = AP_Notify::get_singleton();
     char arm;
     if (AP_Notify::flags.armed) {
         arm = SYM_ARMED;
@@ -481,7 +486,7 @@ void AP_OSD_Screen::draw_sats(uint8_t x, uint8_t y)
 
 void AP_OSD_Screen::draw_batused(uint8_t x, uint8_t y)
 {
-    AP_BattMonitor &battery = AP_BattMonitor::battery();
+    AP_BattMonitor &battery = AP::battery();
     backend->write(x,y, false, "%4d%c", (int)battery.consumed_mah(), SYM_MAH);
 }
 
@@ -489,7 +494,7 @@ void AP_OSD_Screen::draw_batused(uint8_t x, uint8_t y)
 //Thanks to night-ghost for the approach.
 void AP_OSD_Screen::draw_message(uint8_t x, uint8_t y)
 {
-    AP_Notify * notify = AP_Notify::instance();
+    AP_Notify * notify = AP_Notify::get_singleton();
     if (notify) {
         int32_t visible_time = AP_HAL::millis() - notify->get_text_updated_millis();
         if (visible_time < osd->msgtime_s *1000) {
@@ -497,10 +502,14 @@ void AP_OSD_Screen::draw_message(uint8_t x, uint8_t y)
             strncpy(buffer, notify->get_text(), sizeof(buffer));
             int16_t len = strnlen(buffer, sizeof(buffer));
 
-            //converted to uppercase,
-            //because we do not have small letter chars inside used font
             for (int16_t i=0; i<len; i++) {
+                //converted to uppercase,
+                //because we do not have small letter chars inside used font
                 buffer[i] = toupper(buffer[i]);
+                //normalize whitespace
+                if (isspace(buffer[i])) {
+                    buffer[i] = ' ';
+                }
             }
 
             int16_t start_position = 0;
@@ -551,6 +560,7 @@ void AP_OSD_Screen::draw_speed_vector(uint8_t x, uint8_t y,Vector2f v, int32_t y
 void AP_OSD_Screen::draw_gspeed(uint8_t x, uint8_t y)
 {
     AP_AHRS &ahrs = AP::ahrs();
+    WITH_SEMAPHORE(ahrs.get_semaphore());
     Vector2f v = ahrs.groundspeed_vector();
     backend->write(x, y, false, "%c", SYM_GSPD);
     draw_speed_vector(x + 1, y, v, ahrs.yaw_sensor);
@@ -560,6 +570,7 @@ void AP_OSD_Screen::draw_gspeed(uint8_t x, uint8_t y)
 void AP_OSD_Screen::draw_horizon(uint8_t x, uint8_t y)
 {
     AP_AHRS &ahrs = AP::ahrs();
+    WITH_SEMAPHORE(ahrs.get_semaphore());
     float roll = ahrs.roll;
     float pitch = -ahrs.pitch;
 
@@ -622,11 +633,12 @@ void AP_OSD_Screen::draw_distance(uint8_t x, uint8_t y, float distance)
 void AP_OSD_Screen::draw_home(uint8_t x, uint8_t y)
 {
     AP_AHRS &ahrs = AP::ahrs();
+    WITH_SEMAPHORE(ahrs.get_semaphore());
     Location loc;
     if (ahrs.get_position(loc) && ahrs.home_is_set()) {
         const Location &home_loc = ahrs.get_home();
-        float distance = get_distance(home_loc, loc);
-        int32_t angle = wrap_360_cd(get_bearing_cd(loc, home_loc) - ahrs.yaw_sensor);
+        float distance = home_loc.get_distance(loc);
+        int32_t angle = wrap_360_cd(loc.get_bearing_to(home_loc) - ahrs.yaw_sensor);
         int32_t interval = 36000 / SYM_ARROW_COUNT;
         if (distance < 2.0f) {
             //avoid fast rotating arrow at small distances
@@ -688,6 +700,7 @@ void AP_OSD_Screen::draw_compass(uint8_t x, uint8_t y)
 void AP_OSD_Screen::draw_wind(uint8_t x, uint8_t y)
 {
     AP_AHRS &ahrs = AP::ahrs();
+    WITH_SEMAPHORE(ahrs.get_semaphore());
     Vector3f v = ahrs.wind_estimate();
     if (check_option(AP_OSD::OPTION_INVERTED_WIND)) {
         v = -v;
@@ -699,7 +712,9 @@ void AP_OSD_Screen::draw_wind(uint8_t x, uint8_t y)
 void AP_OSD_Screen::draw_aspeed(uint8_t x, uint8_t y)
 {
     float aspd = 0.0f;
-    bool have_estimate = AP::ahrs().airspeed_estimate(&aspd);
+    AP_AHRS &ahrs = AP::ahrs();
+    WITH_SEMAPHORE(ahrs.get_semaphore());
+    bool have_estimate = ahrs.airspeed_estimate(&aspd);
     if (have_estimate) {
         backend->write(x, y, false, "%c%4d%c", SYM_ASPD, (int)u_scale(SPEED, aspd), u_icon(SPEED));
     } else {
@@ -711,10 +726,14 @@ void AP_OSD_Screen::draw_vspeed(uint8_t x, uint8_t y)
 {
     Vector3f v;
     float vspd;
-    if (AP::ahrs().get_velocity_NED(v)) {
+    AP_AHRS &ahrs = AP::ahrs();
+    WITH_SEMAPHORE(ahrs.get_semaphore());
+    if (ahrs.get_velocity_NED(v)) {
         vspd = -v.z;
     } else {
-        vspd = AP::baro().get_climb_rate();
+        auto &baro = AP::baro();
+        WITH_SEMAPHORE(baro.get_semaphore());
+        vspd = baro.get_climb_rate();
     }
     char sym;
     if (vspd > 3.0f) {
@@ -897,8 +916,9 @@ void  AP_OSD_Screen::draw_flightime(uint8_t x, uint8_t y)
 
 void AP_OSD_Screen::draw_eff(uint8_t x, uint8_t y)
 {
-    AP_BattMonitor &battery = AP_BattMonitor::battery();
+    AP_BattMonitor &battery = AP::battery();
     AP_AHRS &ahrs = AP::ahrs();
+    WITH_SEMAPHORE(ahrs.get_semaphore());
     Vector2f v = ahrs.groundspeed_vector();
     float speed = u_scale(SPEED,v.length());
     if (speed > 2.0){
@@ -913,13 +933,17 @@ void AP_OSD_Screen::draw_climbeff(uint8_t x, uint8_t y)
     char unit_icon = u_icon(DISTANCE);
     Vector3f v;
     float vspd;
-    if (AP::ahrs().get_velocity_NED(v)) {
+    auto &ahrs = AP::ahrs();
+    WITH_SEMAPHORE(ahrs.get_semaphore());
+    if (ahrs.get_velocity_NED(v)) {
         vspd = -v.z;
     } else {
-        vspd = AP::baro().get_climb_rate();
+        auto &baro = AP::baro();
+        WITH_SEMAPHORE(baro.get_semaphore());
+        vspd = baro.get_climb_rate();
     }
     if (vspd < 0.0) vspd = 0.0;
-    AP_BattMonitor &battery = AP_BattMonitor::battery();
+    AP_BattMonitor &battery = AP::battery();
     float amps = battery.current_amps();
     if (amps > 0.0) {
         backend->write(x, y, false,"%c%c%3.1f%c",SYM_PTCHUP,SYM_EFF,(double)(3.6f * u_scale(VSPEED,vspd)/amps),unit_icon);
@@ -952,7 +976,7 @@ void AP_OSD_Screen::draw_atemp(uint8_t x, uint8_t y)
 
 void AP_OSD_Screen::draw_bat2_vlt(uint8_t x, uint8_t y)
 {
-    AP_BattMonitor &battery = AP_BattMonitor::battery();
+    AP_BattMonitor &battery = AP::battery();
     uint8_t pct2 = battery.capacity_remaining_pct(1);
     uint8_t p2 = (100 - pct2) / 16.6;
     float v2 = battery.voltage(1);
@@ -961,7 +985,7 @@ void AP_OSD_Screen::draw_bat2_vlt(uint8_t x, uint8_t y)
 
 void AP_OSD_Screen::draw_bat2used(uint8_t x, uint8_t y)
 {
-    AP_BattMonitor &battery = AP_BattMonitor::battery();
+    AP_BattMonitor &battery = AP::battery();
     float ah = battery.consumed_mah(1) / 1000;
     if (battery.consumed_mah(1) <= 9999) {
         backend->write(x,y, false, "%4d%c", (int)battery.consumed_mah(1), SYM_MAH);

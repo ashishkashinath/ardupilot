@@ -1,12 +1,12 @@
 #include <AP_HAL/AP_HAL.h>
 
-#if HAL_CPU_CLASS >= HAL_CPU_CLASS_150
 #include "AP_NavEKF2.h"
 #include "AP_NavEKF2_core.h"
 #include <AP_AHRS/AP_AHRS.h>
 #include <AP_Vehicle/AP_Vehicle.h>
 #include <GCS_MAVLink/GCS.h>
 #include <AP_RangeFinder/RangeFinder_Backend.h>
+#include <AP_GPS/AP_GPS.h>
 
 #include <stdio.h>
 
@@ -247,6 +247,7 @@ void NavEKF2_core::readMagData()
                     magStateResetRequest = true;
                     // declare the field unlearned so that the reset request will be obeyed
                     magFieldLearned = false;
+                    break;
                 }
             }
         }
@@ -529,9 +530,20 @@ void NavEKF2_core::readGpsData()
 
             }
 
+            if (gpsGoodToAlign && !have_table_earth_field) {
+                table_earth_field_ga = AP_Declination::get_earth_field_ga(gpsloc);
+                table_declination = radians(AP_Declination::get_declination(gpsloc.lat*1.0e-7,
+                                                                            gpsloc.lng*1.0e-7));
+                have_table_earth_field = true;
+                if (frontend->_mag_ef_limit > 0) {
+                    // initialise earth field from tables
+                    stateStruct.earth_magfield = table_earth_field_ga;
+                }
+            }
+            
             // convert GPS measurements to local NED and save to buffer to be fused later if we have a valid origin
             if (validOrigin) {
-                gpsDataNew.pos = location_diff(EKF_origin, gpsloc);
+                gpsDataNew.pos = EKF_origin.get_distance_NE(gpsloc);
                 gpsDataNew.hgt = (float)((double)0.01 * (double)gpsloc.alt - ekfGpsRefHgt);
                 storedGPS.push(gpsDataNew);
                 // declare GPS available for use
@@ -665,7 +677,7 @@ void NavEKF2_core::readAirSpdData()
     if (aspeed &&
             aspeed->use() &&
             aspeed->last_update_ms() != timeTasReceived_ms) {
-        tasDataNew.tas = aspeed->get_airspeed() * aspeed->get_EAS2TAS();
+        tasDataNew.tas = aspeed->get_airspeed() * AP::ahrs().get_EAS2TAS();
         timeTasReceived_ms = aspeed->last_update_ms();
         tasDataNew.time_ms = timeTasReceived_ms - frontend->tasDelay_ms;
 
@@ -845,10 +857,30 @@ void NavEKF2_core::writeExtNavData(const Vector3f &sensOffset, const Vector3f &p
     }
     extNavDataNew.angErr = angErr;
     extNavDataNew.body_offset = &sensOffset;
+    timeStamp_ms = timeStamp_ms - frontend->_extnavDelay_ms;
+    // Correct for the average intersampling delay due to the filter updaterate
+    timeStamp_ms -= localFilterTimeStep_ms/2;
+    // Prevent time delay exceeding age of oldest IMU data in the buffer
+    timeStamp_ms = MAX(timeStamp_ms,imuDataDelayed.time_ms);
     extNavDataNew.time_ms = timeStamp_ms;
 
     storedExtNav.push(extNavDataNew);
 
 }
 
-#endif // HAL_CPU_CLASS
+/*
+  return declination in radians
+*/
+float NavEKF2_core::MagDeclination(void) const
+{
+    // if we are using the WMM tables then use the table declination
+    // to ensure consistency with the table mag field. Otherwise use
+    // the declination from the compass library
+    if (have_table_earth_field && frontend->_mag_ef_limit > 0) {
+        return table_declination;
+    }
+    if (!use_compass()) {
+        return 0;
+    }
+    return _ahrs->get_compass()->get_declination();
+}

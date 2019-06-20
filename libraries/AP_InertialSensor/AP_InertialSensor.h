@@ -3,7 +3,6 @@
 // Gyro and Accelerometer calibration criteria
 #define AP_INERTIAL_SENSOR_ACCEL_TOT_MAX_OFFSET_CHANGE  4.0f
 #define AP_INERTIAL_SENSOR_ACCEL_MAX_OFFSET             250.0f
-#define AP_INERTIAL_SENSOR_ACCEL_CLIP_THRESH_MSS        (15.5f*GRAVITY_MSS) // accelerometer values over 15.5G are recorded as a clipping error
 #define AP_INERTIAL_SENSOR_ACCEL_VIBE_FLOOR_FILT_HZ     5.0f    // accel vibration floor filter hz
 #define AP_INERTIAL_SENSOR_ACCEL_VIBE_FILT_HZ           2.0f    // accel vibration filter hz
 #define AP_INERTIAL_SENSOR_ACCEL_PEAK_DETECT_TIMEOUT_MS 500     // peak-hold detector timeout
@@ -32,10 +31,10 @@ class AuxiliaryBus;
 class AP_AHRS;
 
 /*
-  forward declare DataFlash class. We can't include DataFlash.h
+  forward declare AP_Logger class. We can't include logger.h
   because of mutual dependencies
  */
-class DataFlash_Class;
+class AP_Logger;
 
 /* AP_InertialSensor is an abstraction for gyro and accel measurements
  * which are correctly aligned to the body axes and scaled to SI units.
@@ -55,7 +54,7 @@ public:
     AP_InertialSensor(const AP_InertialSensor &other) = delete;
     AP_InertialSensor &operator=(const AP_InertialSensor&) = delete;
 
-    static AP_InertialSensor *get_instance();
+    static AP_InertialSensor *get_singleton();
 
     enum Gyro_Calibration_Timing {
         GYRO_CAL_NEVER = 0,
@@ -135,7 +134,7 @@ public:
     bool gyro_calibrated_ok(uint8_t instance) const { return _gyro_cal_ok[instance]; }
     bool gyro_calibrated_ok_all() const;
     bool use_gyro(uint8_t instance) const;
-    Gyro_Calibration_Timing gyro_calibration_timing() { return (Gyro_Calibration_Timing)_gyro_cal_timing.get(); }
+    Gyro_Calibration_Timing gyro_calibration_timing();
 
     bool get_accel_health(uint8_t instance) const { return (instance<_accel_count) ? _accel_healthy[instance] : false; }
     bool get_accel_health(void) const { return get_accel_health(_primary_accel); }
@@ -207,10 +206,10 @@ public:
     void set_hil_mode(void) { _hil_mode = true; }
 
     // get the gyro filter rate in Hz
-    uint8_t get_gyro_filter_hz(void) const { return _gyro_filter_cutoff; }
+    uint16_t get_gyro_filter_hz(void) const { return _gyro_filter_cutoff; }
 
     // get the accel filter rate in Hz
-    uint8_t get_accel_filter_hz(void) const { return _accel_filter_cutoff; }
+    uint16_t get_accel_filter_hz(void) const { return _accel_filter_cutoff; }
 
     // indicate which bit in LOG_BITMASK indicates raw logging enabled
     void set_log_raw_bit(uint32_t log_raw_bit) { _log_raw_bit = log_raw_bit; }
@@ -295,6 +294,7 @@ public:
         void periodic();
 
         bool doing_sensor_rate_logging() const { return _doing_sensor_rate_logging; }
+        bool doing_post_filter_logging() const { return _doing_post_filter_logging; }
 
         // class level parameters
         static const struct AP_Param::GroupInfo var_info[];
@@ -304,7 +304,7 @@ public:
         AP_Int8 _sensor_mask;
         AP_Int8 _batch_options_mask;
 
-        // Parameters controlling pushing data to DataFlash:
+        // Parameters controlling pushing data to AP_Logger:
         // Each DF message is ~ 108 bytes in size, so we use about 1kB/s of
         // logging bandwidth with a 100ms interval.  If we are taking
         // 1024 samples then we need to send 32 packets, so it will
@@ -321,6 +321,7 @@ public:
 
         enum batch_opt_t {
             BATCH_OPT_SENSOR_RATE = (1<<0),
+            BATCH_OPT_POST_FILTER = (1<<1),
         };
 
         void rotate_to_next_sensor();
@@ -334,6 +335,7 @@ public:
         bool initialised : 1;
         bool isbh_sent : 1;
         bool _doing_sensor_rate_logging : 1;
+        bool _doing_post_filter_logging : 1;
         uint8_t instance : 3; // instance we are sending data for
         AP_InertialSensor::IMU_SENSOR_TYPE type : 1;
         uint16_t isb_seqnum;
@@ -403,7 +405,8 @@ private:
     bool _new_gyro_data[INS_MAX_INSTANCES];
 
     // optional notch filter on gyro
-    NotchFilterVector3fParam _notch_filter;
+    NotchFilterParams _notch_filter;
+    NotchFilterVector3f _gyro_notch_filter[INS_MAX_INSTANCES];
 
     // Most recent gyro reading
     Vector3f _gyro[INS_MAX_INSTANCES];
@@ -423,9 +426,6 @@ private:
     // multipliers for data supplied via sensor-rate logging:
     uint16_t _accel_raw_sampling_multiplier[INS_MAX_INSTANCES];
     uint16_t _gyro_raw_sampling_multiplier[INS_MAX_INSTANCES];
-
-    // product id
-    AP_Int16 _old_product_id;
 
     // IDs to uniquely identify each sensor: shall remain
     // the same across reboots
@@ -466,8 +466,8 @@ private:
     float _temperature[INS_MAX_INSTANCES];
 
     // filtering frequency (0 means default)
-    AP_Int8     _accel_filter_cutoff;
-    AP_Int8     _gyro_filter_cutoff;
+    AP_Int16    _accel_filter_cutoff;
+    AP_Int16    _gyro_filter_cutoff;
     AP_Int8     _gyro_cal_timing;
 
     // use for attitude, velocity, position estimates
@@ -556,7 +556,7 @@ private:
     AP_Int8 _acc_body_aligned;
     AP_Int8 _trim_option;
 
-    static AP_InertialSensor *_s_instance;
+    static AP_InertialSensor *_singleton;
     AP_AccelCal* _acal;
 
     AccelCalibrator *_accel_calibrator;

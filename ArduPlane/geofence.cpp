@@ -280,6 +280,52 @@ bool Plane::geofence_check_maxalt(void)
     return (adjusted_altitude_cm() > (g.fence_maxalt*100.0f) + home.alt);
 }
 
+/*
+  pre-arm check for being inside the fence
+ */
+bool Plane::geofence_prearm_check(void)
+{
+    if (!geofence_enabled()) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "PreArm: Fence not enabled");
+        return false;
+    }
+
+    /* allocate the geo-fence state if need be */
+    if (geofence_state == nullptr || !geofence_state->boundary_uptodate) {
+        geofence_load();
+        if (!geofence_enabled()) {
+            // may have been disabled by load
+            gcs().send_text(MAV_SEVERITY_WARNING, "PreArm: Fence load failed");
+            return false;
+        }
+    }
+
+    if (geofence_state->floor_enabled && g.fence_minalt != 0) {
+        // can't use minalt with prearm check
+        gcs().send_text(MAV_SEVERITY_WARNING, "PreArm: Fence floor enabled");
+        return false;
+    }
+    if (geofence_check_maxalt()) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "PreArm: maxalt breached");
+        return false;
+    }
+    struct Location loc;
+    if (!ahrs.get_position(loc)) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "PreArm: no position available");
+        // must have position
+        return false;
+    }
+    Vector2l location;
+    location.x = loc.lat;
+    location.y = loc.lng;
+    bool outside = Polygon_outside(location, &geofence_state->boundary[1], geofence_state->num_points-1);
+    if (outside) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "PreArm: outside fence");
+        return false;
+    }
+    return true;
+}
+
 
 /*
  *  check if we have breached the geo-fence
@@ -291,14 +337,14 @@ void Plane::geofence_check(bool altitude_check_only)
         // GUIDED to the return point
         if (geofence_state != nullptr &&
             (g.fence_action == FENCE_ACTION_GUIDED || g.fence_action == FENCE_ACTION_GUIDED_THR_PASS || g.fence_action == FENCE_ACTION_RTL) &&
-            (control_mode == GUIDED || control_mode == AVOID_ADSB) &&
+            (control_mode == &mode_guided || control_mode == &mode_avoidADSB) &&
             geofence_present() &&
             geofence_state->boundary_uptodate &&
             geofence_state->old_switch_position == oldSwitchPosition &&
             guided_WP_loc.lat == geofence_state->guided_lat &&
             guided_WP_loc.lng == geofence_state->guided_lng) {
             geofence_state->old_switch_position = 254;
-            set_mode(get_previous_mode(), MODE_REASON_GCS_COMMAND);
+            set_mode(*previous_mode, MODE_REASON_GCS_COMMAND);
         }
         return;
     }
@@ -354,7 +400,7 @@ void Plane::geofence_check(bool altitude_check_only)
 
     // we are outside the fence
     if (geofence_state->fence_triggered &&
-        (control_mode == GUIDED || control_mode == AVOID_ADSB || control_mode == RTL || g.fence_action == FENCE_ACTION_REPORT)) {
+        (control_mode == &mode_guided || control_mode == &mode_avoidADSB || control_mode == &mode_rtl || g.fence_action == FENCE_ACTION_REPORT)) {
         // we have already triggered, don't trigger again until the
         // user disables/re-enables using the fence channel switch
         return;
@@ -386,9 +432,9 @@ void Plane::geofence_check(bool altitude_check_only)
         int8_t saved_auto_trim = g.auto_trim;
         g.auto_trim.set(0);
         if (g.fence_action == FENCE_ACTION_RTL) {
-            set_mode(RTL, MODE_REASON_FENCE_BREACH);
+            set_mode(mode_rtl, MODE_REASON_FENCE_BREACH);
         } else {
-            set_mode(GUIDED, MODE_REASON_FENCE_BREACH);
+            set_mode(mode_guided, MODE_REASON_FENCE_BREACH);
         }
         g.auto_trim.set(saved_auto_trim);
 
@@ -396,6 +442,7 @@ void Plane::geofence_check(bool altitude_check_only)
             guided_WP_loc = rally.calc_best_rally_or_home_location(current_loc, get_RTL_altitude());
 
         } else { //return to fence return point, not a rally point
+            guided_WP_loc = {};
             if (g.fence_retalt > 0) {
                 //fly to the return point using fence_retalt
                 guided_WP_loc.alt = home.alt + 100.0f*g.fence_retalt;
@@ -407,7 +454,6 @@ void Plane::geofence_check(bool altitude_check_only)
                 // min and max
                 guided_WP_loc.alt = home.alt + 100.0f*(g.fence_minalt + g.fence_maxalt)/2;
             }
-            guided_WP_loc.options = 0;
             guided_WP_loc.lat = geofence_state->boundary[0].x;
             guided_WP_loc.lng = geofence_state->boundary[0].y;
         }
@@ -438,7 +484,7 @@ bool Plane::geofence_stickmixing(void) {
     if (geofence_enabled() &&
         geofence_state != nullptr &&
         geofence_state->fence_triggered &&
-        (control_mode == GUIDED || control_mode == AVOID_ADSB)) {
+        (control_mode == &mode_guided || control_mode == &mode_avoidADSB)) {
         // don't mix in user input
         return false;
     }

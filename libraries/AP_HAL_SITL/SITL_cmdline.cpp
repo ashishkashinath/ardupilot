@@ -6,10 +6,8 @@
 #include "AP_HAL_SITL_Namespace.h"
 #include "HAL_SITL_Class.h"
 #include "UARTDriver.h"
-#include <stdio.h>
-#include <signal.h>
-#include <unistd.h>
 #include <AP_HAL/utility/getopt_cpp.h>
+#include <AP_Logger/AP_Logger_SITL.h>
 
 #include <SITL/SIM_Multicopter.h>
 #include <SITL/SIM_Helicopter.h>
@@ -29,6 +27,10 @@
 #include <SITL/SIM_Calibration.h>
 #include <SITL/SIM_XPlane.h>
 #include <SITL/SIM_Submarine.h>
+#include <SITL/SIM_Morse.h>
+
+#include <signal.h>
+#include <stdio.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -39,6 +41,15 @@ using namespace SITL;
 static void _sig_fpe(int signum)
 {
     fprintf(stderr, "ERROR: Floating point exception - aborting\n");
+    AP_HAL::dump_stack_trace();
+    abort();
+}
+
+// catch segfault
+static void _sig_segv(int signum)
+{
+    fprintf(stderr, "ERROR: segmentation fault - aborting\n");
+    AP_HAL::dump_stack_trace();
     abort();
 }
 
@@ -46,7 +57,7 @@ void SITL_State::_usage(void)
 {
     printf("Options:\n"
            "\t--help|-h                display this help information\n"
-           "\t--wipe|-w                wipe eeprom and dataflash\n"
+           "\t--wipe|-w                wipe eeprom\n"
            "\t--unhide-groups|-u       parameter enumeration ignores AP_PARAM_FLAG_ENABLE\n"
            "\t--speedup|-s SPEEDUP     set simulation speedup\n"
            "\t--rate|-r RATE           set SITL framerate\n"
@@ -89,6 +100,9 @@ static const struct {
     { "quad",               MultiCopter::create },
     { "copter",             MultiCopter::create },
     { "x",                  MultiCopter::create },
+    { "bfx",                MultiCopter::create },
+    { "djix",               MultiCopter::create },
+    { "cwx",                MultiCopter::create },
     { "hexa",               MultiCopter::create },
     { "octa",               MultiCopter::create },
     { "dodeca-hexa",        MultiCopter::create },
@@ -112,21 +126,26 @@ static const struct {
     { "plane",              Plane::create },
     { "calibration",        Calibration::create },
     { "vectored",           Submarine::create },
+    { "morse",              Morse::create },
 };
 
 void SITL_State::_set_signal_handlers(void) const
 {
     struct sigaction sa_fpe = {};
-
     sigemptyset(&sa_fpe.sa_mask);
     sa_fpe.sa_handler = _sig_fpe;
     sigaction(SIGFPE, &sa_fpe, nullptr);
 
     struct sigaction sa_pipe = {};
-
     sigemptyset(&sa_pipe.sa_mask);
     sa_pipe.sa_handler = SIG_IGN; /* No-op SIGPIPE handler */
     sigaction(SIGPIPE, &sa_pipe, nullptr);
+
+    struct sigaction sa_segv = {};
+    sigemptyset(&sa_segv.sa_mask);
+    sa_segv.sa_handler = _sig_segv;
+    sigaction(SIGSEGV, &sa_segv, nullptr);
+
 }
 
 void SITL_State::_parse_command_line(int argc, char * const argv[])
@@ -227,7 +246,7 @@ void SITL_State::_parse_command_line(int argc, char * const argv[])
         switch (opt) {
         case 'w':
             AP_Param::erase_all();
-            unlink("dataflash.bin");
+            unlink(AP_Logger_SITL::filename);
             break;
         case 'u':
             AP_Param::set_hide_disabled_groups(false);

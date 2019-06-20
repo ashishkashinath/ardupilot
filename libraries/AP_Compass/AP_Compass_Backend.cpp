@@ -3,8 +3,7 @@
 #include "AP_Compass.h"
 #include "AP_Compass_Backend.h"
 
-#include <AP_Common/Semaphore.h>
-#include <stdio.h>
+#include <AP_BattMonitor/AP_BattMonitor.h>
 
 extern const AP_HAL::HAL& hal;
 

@@ -18,6 +18,7 @@
 #include <AP_RCMapper/AP_RCMapper.h>
 #include <AP_Common/Bitmask.h>
 #include <AP_Volz_Protocol/AP_Volz_Protocol.h>
+#include <AP_RobotisServo/AP_RobotisServo.h>
 #include <AP_SBusOut/AP_SBusOut.h>
 #include <AP_BLHeli/AP_BLHeli.h>
 
@@ -192,6 +193,9 @@ public:
     // return true if function is for a multicopter motor
     static bool is_motor(SRV_Channel::Aux_servo_function_t function);
 
+    // return true if function is for anything that should be stopped in a e-stop situation, ie is dangerous
+    static bool should_e_stop(SRV_Channel::Aux_servo_function_t function);
+
     // return the function of a channel
     SRV_Channel::Aux_servo_function_t get_function(void) const {
         return (SRV_Channel::Aux_servo_function_t)function.get();
@@ -213,7 +217,11 @@ public:
     bool function_configured(void) const {
         return function.configured();
     }
-    
+
+    // specify that small rc input changes should be ignored during passthrough
+    // used by DO_SET_SERVO commands
+    void ignore_small_rcin_changes() { ign_small_rcin_changes = true; }
+
 private:
     AP_Int16 servo_min;
     AP_Int16 servo_max;
@@ -264,6 +272,13 @@ private:
     // mask of channels where we have a output_pwm value. Cleared when a
     // scaled value is written. 
     static servo_mask_t have_pwm_mask;
+
+    // previous radio_in during pass-thru
+    int16_t previous_radio_in;
+
+    // specify that small rcinput changes should be ignored during passthrough
+    // used by DO_SET_SERVO commands
+    bool ign_small_rcin_changes;
 };
 
 /*
@@ -455,7 +470,15 @@ public:
     static void set_digital_mask(uint16_t mask) {
         digital_mask |= mask;
     }
-    
+
+    // Set E - stop
+    static void set_emergency_stop(bool state) {
+        emergency_stop = state;
+    }
+
+    // get E - stop
+    static bool get_emergency_stop() { return emergency_stop;}
+
 private:
     struct {
         bool k_throttle_reversible:1;
@@ -465,12 +488,12 @@ private:
 
     SRV_Channel::servo_mask_t trimmed_mask;
 
-    static Bitmask function_mask;
+    static Bitmask<SRV_Channel::k_nr_aux_servo_functions> function_mask;
     static bool initialised;
 
     // this static arrangement is to avoid having static objects in AP_Param tables
     static SRV_Channel *channels;
-    static SRV_Channels *instance;
+    static SRV_Channels *_singleton;
 
     // support for Volz protocol
     AP_Volz_Protocol volz;
@@ -480,6 +503,10 @@ private:
     AP_SBusOut sbus;
     static AP_SBusOut *sbus_ptr;
 
+    // support for Robotis servo protocol
+    AP_RobotisServo robotis;
+    static AP_RobotisServo *robotis_ptr;
+    
 #if HAL_SUPPORT_RCOUT_SERIAL
     // support for BLHeli protocol
     AP_BLHeli blheli;
@@ -511,4 +538,6 @@ private:
     static bool passthrough_disabled(void) {
         return disabled_passthrough;
     }
+
+    static bool emergency_stop;
 };

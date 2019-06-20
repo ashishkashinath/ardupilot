@@ -46,7 +46,17 @@ void SRV_Channel::output_ch(void)
             if (SRV_Channels::passthrough_disabled()) {
                 output_pwm = c->get_radio_trim();
             } else {
-                output_pwm = c->get_radio_in();
+                const int16_t radio_in = c->get_radio_in();
+                if (!ign_small_rcin_changes) {
+                    output_pwm = radio_in;
+                    previous_radio_in = radio_in;
+                } else {
+                    // check if rc input value has changed by more than the deadzone
+                    if (abs(radio_in - previous_radio_in) > c->get_dead_zone()) {
+                        output_pwm = radio_in;
+                        ign_small_rcin_changes = false;
+                    }
+                }
             }
         }
     }
@@ -153,7 +163,7 @@ void SRV_Channels::update_aux_servo_function(void)
 /// Should be called after the the servo functions have been initialized
 void SRV_Channels::enable_aux_servos()
 {
-    hal.rcout->set_default_rate(uint16_t(instance->default_rate.get()));
+    hal.rcout->set_default_rate(uint16_t(_singleton->default_rate.get()));
 
     update_aux_servo_function();
 

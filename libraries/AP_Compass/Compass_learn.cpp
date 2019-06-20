@@ -3,7 +3,7 @@
 
 #include <AP_Compass/AP_Compass.h>
 #include <AP_Declination/AP_Declination.h>
-#include <DataFlash/DataFlash.h>
+#include <AP_Logger/AP_Logger.h>
 
 #include "Compass_learn.h"
 #include <GCS_MAVLink/GCS.h>
@@ -42,17 +42,8 @@ void CompassLearn::update(void)
         // remember primary mag
         primary_mag = compass.get_primary();
 
-        // setup the expected earth field at this location
-        float declination_deg=0, inclination_deg=0, intensity_gauss=0;
-        AP_Declination::get_mag_field_ef(loc.lat*1.0e-7, loc.lng*1.0e-7, intensity_gauss, declination_deg, inclination_deg);
-
-        // create earth field
-        mag_ef = Vector3f(intensity_gauss*1000, 0.0, 0.0);
-        Matrix3f R;
-
-        R.from_euler(0.0f, -ToRad(inclination_deg), ToRad(declination_deg));
-        mag_ef = R * mag_ef;
-
+        // setup the expected earth field in mGauss at this location
+        mag_ef = AP_Declination::get_earth_field_ga(loc) * 1000;
         have_earth_field = true;
 
         // form eliptical correction matrix and invert it. This is
@@ -71,8 +62,9 @@ void CompassLearn::update(void)
         }
 
         // set initial error to field intensity
+        float intensity = mag_ef.length();
         for (uint16_t i=0; i<num_sectors; i++) {
-            errors[i] = intensity_gauss*1000;
+            errors[i] = intensity;
         }
         
         gcs().send_text(MAV_SEVERITY_INFO, "CompassLearn: have earth field");
@@ -104,7 +96,7 @@ void CompassLearn::update(void)
     }
 
     if (sample_available) {
-        DataFlash_Class::instance()->Log_Write("COFS", "TimeUS,OfsX,OfsY,OfsZ,Var,Yaw,WVar,N", "QffffffI",
+        AP::logger().Write("COFS", "TimeUS,OfsX,OfsY,OfsZ,Var,Yaw,WVar,N", "QffffffI",
                                                AP_HAL::micros64(),
                                                (double)best_offsets.x,
                                                (double)best_offsets.y,
@@ -213,7 +205,7 @@ void CompassLearn::process_sample(const struct sample &s)
             predicted_offsets[i] = offsets;
         } else {
             // lowpass the predicted offsets and the error
-            const float learn_rate = 0.92;
+            const float learn_rate = 0.92f;
             predicted_offsets[i] = predicted_offsets[i] * learn_rate + offsets * (1-learn_rate);
             errors[i] = errors[i] * learn_rate + delta * (1-learn_rate);
         }

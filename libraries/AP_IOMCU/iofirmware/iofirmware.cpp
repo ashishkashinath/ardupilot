@@ -25,6 +25,7 @@
 #include <AP_HAL_ChibiOS/RCOutput.h>
 #include "analog.h"
 #include "rc.h"
+#include <AP_HAL_ChibiOS/hwdef/common/watchdog.h>
 
 extern const AP_HAL::HAL &hal;
 
@@ -39,6 +40,9 @@ void setup();
 void loop();
 
 const AP_HAL::HAL& hal = AP_HAL::get_HAL();
+
+// enable testing of IOMCU watchdog using safety switch
+#define IOMCU_ENABLE_WATCHDOG_TEST 0
 
 // pending events on the main thread
 enum ioevents {
@@ -167,6 +171,15 @@ void AP_IOMCU_FW::init()
         has_heater = true;
     }
 
+    //Set Heater PWM Polarity, 0 for Active Low and 1 for Active High
+    heater_pwm_polarity = !palReadLine(HAL_GPIO_PIN_HEATER);
+    //Set Heater pin mode
+    if (heater_pwm_polarity) {
+        palSetLineMode(HAL_GPIO_PIN_HEATER, PAL_MODE_OUTPUT_PUSHPULL);
+    } else {
+        palSetLineMode(HAL_GPIO_PIN_HEATER, PAL_MODE_OUTPUT_OPENDRAIN);
+    }
+
     adc_init();
     rcin_serial_init();
 
@@ -176,6 +189,11 @@ void AP_IOMCU_FW::init()
 
     // we do no allocations after setup completes
     reg_status.freemem = hal.util->available_memory();
+
+    if (hal.util->was_watchdog_safety_off()) {
+        hal.rcout->force_safety_off();
+        reg_status.flag_safety_off = true;
+    }
 }
 
 
@@ -202,6 +220,7 @@ void AP_IOMCU_FW::update()
     }
 
     uint32_t now = last_ms;
+    reg_status.timestamp_ms = last_ms;
 
     // output SBUS if enabled
     if ((reg_setup.features & P_SETUP_FEATURES_SBUS1_OUT) &&
@@ -274,10 +293,11 @@ void AP_IOMCU_FW::heater_update()
         }
     } else if (reg_setup.heater_duty_cycle == 0 || (now - last_heater_ms > 3000UL)) {
         // turn off the heater
-        HEATER_SET(0);
+        HEATER_SET(!heater_pwm_polarity);
     } else {
         uint8_t cycle = ((now / 10UL) % 100U);
-        HEATER_SET(!(cycle >= reg_setup.heater_duty_cycle));
+        //Turn off heater when cycle is greater than specified duty cycle
+        HEATER_SET((cycle >= reg_setup.heater_duty_cycle) ? !heater_pwm_polarity : heater_pwm_polarity);
     }
 }
 
@@ -660,7 +680,28 @@ void AP_IOMCU_FW::safety_update(void)
     if (safety_button_counter == 10) {
         // safety has been pressed for 1 second, change state
         reg_status.flag_safety_off = !reg_status.flag_safety_off;
+        if (reg_status.flag_safety_off) {
+            hal.rcout->force_safety_off();
+        } else {
+            hal.rcout->force_safety_on();
+        }
     }
+
+#if IOMCU_ENABLE_WATCHDOG_TEST
+    if (safety_button_counter == 50) {
+        // deliberate lockup of IOMCU on 5s button press, for testing
+        // watchdog
+        while (true) {
+            hal.scheduler->delay(50);
+            palToggleLine(HAL_GPIO_PIN_SAFETY_LED);
+            if (palReadLine(HAL_GPIO_PIN_SAFETY_INPUT)) {
+                // only trigger watchdog on button release, so we
+                // don't end up stuck in the bootloader
+                stm32_watchdog_pat();
+            }
+        }
+    }
+#endif
 
     led_counter = (led_counter+1) % 16;
     const uint16_t led_pattern = reg_status.flag_safety_off?0xFFFF:0x5500;
